@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Portal Admin</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header class="top">
+      <h1>Admin</h1>
+      <button id="signout">Sign out</button>
+    </header>
+    <div id="notice"></div>
+    <section class="card">
+      <h2>Clients</h2>
+      <div class="table-wrap" id="clients">Loading…</div>
+    </section>
+    <section class="card">
+      <h2>New automation quote</h2>
+      <p class="muted">Creates and finalizes a Stripe invoice. It appears in the client's portal once Stripe confirms it.</p>
+      <form id="quote">
+        <label for="client">Client</label>
+        <select id="client" required></select>
+        <label for="description">Description</label>
+        <input id="description" required maxlength="500">
+        <label for="amount">Amount (USD)</label>
+        <input id="amount" type="number" min="1" max="100000" step="0.01" required>
+        <label for="days">Days until due</label>
+        <input id="days" type="number" min="1" max="90" value="14" required>
+        <p><button class="primary" type="submit">Create invoice</button></p>
+      </form>
+    </section>
+  </main>
+  <script type="module">
+    import { getSupabase, requireSession, api, date, el, signOut } from '/app.js';
+
+    const session = await requireSession();
+    if (!session) throw new Error('signed out');
+    const sb = await getSupabase();
+    const $ = (id) => document.getElementById(id);
+    $('signout').addEventListener('click', signOut);
+    const notice = (text, kind = '') => $('notice').replaceChildren(text ? el('div', { class: `notice ${kind}` }, text) : '');
+
+    // The server re-checks admin on every action; this only decides what to show.
+    const { data: isAdmin } = await sb.rpc('is_admin');
+    if (!isAdmin) {
+      location.replace('/dashboard');
+      throw new Error('not admin');
+    }
+
+    const { data: clients, error } = await sb.from('clients')
+      .select('id, business_name, email, status, stripe_customer_id, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    $('clients').replaceChildren(el('table', {},
+      el('thead', {}, el('tr', {}, ['Business', 'Email', 'Status', 'Stripe', 'Created'].map((h) => el('th', {}, h)))),
+      el('tbody', {}, clients.map((c) => el('tr', {},
+        el('td', {}, c.business_name), el('td', {}, c.email), el('td', {}, c.status),
+        el('td', {}, c.stripe_customer_id ? 'linked' : 'pending'), el('td', {}, date(c.created_at)))))));
+    $('client').replaceChildren(...clients.map((c) => el('option', { value: c.id }, c.business_name)));
+
+    // One request_id per form fill, so a double submit can't create two invoices.
+    let requestId = crypto.randomUUID();
+    $('quote').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const button = e.target.querySelector('button');
+      button.disabled = true;
+      try {
+        const res = await api('/api/admin/create-quote', {
+          client_id: $('client').value,
+          description: $('description').value.trim(),
+          amount_cents: Math.round(Number($('amount').value) * 100),
+          days_until_due: Number($('days').value),
+          request_id: requestId,
+        });
+        notice(`Invoice ${res.invoice_id} created.`);
+        e.target.reset();
+        requestId = crypto.randomUUID();
+      } catch (err) {
+        notice(`Could not create invoice: ${err.code ?? err.message}`, 'error');
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

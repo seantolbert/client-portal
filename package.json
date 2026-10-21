@@ -1,0 +1,22 @@
+{
+  "name": "clientportal",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "stripe:setup": "node scripts/stripe-setup.mjs",
+    "smoke:handoff": "node scripts/handoff-smoke.mjs",
+    "dev": "node --env-file=.env.local scripts/dev-server.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.2",
+    "stripe": "23.0.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.11",
+    "supabase": "2.121.0"
+  }
+}

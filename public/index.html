@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Client Portal</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="narrow">
+    <div class="card">
+      <h1>Client portal</h1>
+      <p class="muted">Sign in with the email address on your account. We'll send you a sign-in link.</p>
+      <form id="login">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" required maxlength="254">
+        <p><button class="primary" type="submit">Email me a sign-in link</button></p>
+      </form>
+      <p id="status" class="muted" role="status"></p>
+    </div>
+  </main>
+  <script type="module">
+    import { getSupabase } from '/app.js';
+
+    const sb = await getSupabase();
+    const { data } = await sb.auth.getSession();
+    if (data.session) location.replace('/dashboard');
+
+    const form = document.getElementById('login');
+    const status = document.getElementById('status');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const button = form.querySelector('button');
+      button.disabled = true;
+      const { error } = await sb.auth.signInWithOtp({
+        email: document.getElementById('email').value.trim(),
+        // Accounts are created only by the CRM handoff; no self sign-up.
+        options: { shouldCreateUser: false, emailRedirectTo: `${location.origin}/dashboard` },
+      });
+      button.disabled = false;
+      // Same message either way so the form doesn't reveal which emails have accounts.
+      status.textContent = error && error.status === 429
+        ? 'Too many attempts. Please wait a minute and try again.'
+        : 'If that email has a portal account, a sign-in link is on its way.';
+    });
+  </script>
+</body>
+</html>

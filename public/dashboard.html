@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Billing Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header class="top">
+      <div>
+        <h1 id="business">Your account</h1>
+        <div class="muted" id="who"></div>
+      </div>
+      <button id="signout">Sign out</button>
+    </header>
+    <div id="notice"></div>
+    <section class="card">
+      <h2>Billing</h2>
+      <div id="plan" class="muted">Loading…</div>
+      <p class="actions" id="actions"></p>
+    </section>
+    <section class="card">
+      <h2>Invoices</h2>
+      <div class="table-wrap" id="invoices"></div>
+    </section>
+    <section class="card">
+      <h2>Payment history</h2>
+      <div class="table-wrap" id="payments"></div>
+    </section>
+  </main>
+  <script type="module">
+    import { getSupabase, requireSession, api, money, date, el, signOut } from '/app.js';
+
+    const session = await requireSession();
+    if (!session) throw new Error('signed out');
+    // Drop ?code= and ?checkout= from the address bar after reading them.
+    const params = new URLSearchParams(location.search);
+    history.replaceState(null, '', '/dashboard');
+
+    const sb = await getSupabase();
+    const $ = (id) => document.getElementById(id);
+    $('who').textContent = session.user.email;
+    $('signout').addEventListener('click', signOut);
+
+    function notice(text, kind = '') {
+      $('notice').replaceChildren(text ? el('div', { class: `notice ${kind}` }, text) : '');
+    }
+
+    const statusBadge = (s) => {
+      const kind = { paid: 'good', active: 'good', trialing: 'good', open: 'warn', past_due: 'bad', unpaid: 'bad', uncollectible: 'bad' }[s] ?? '';
+      return el('span', { class: `badge ${kind}` }, (s ?? 'unknown').replace('_', ' '));
+    };
+
+    function table(headers, rows, empty) {
+      if (!rows.length) return el('p', { class: 'muted' }, empty);
+      return el('table', {}, el('thead', {}, el('tr', {}, headers.map((h) => el('th', {}, h)))),
+        el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((c) => el('td', {}, c))))));
+    }
+
+    async function go(button, path, body) {
+      button.disabled = true;
+      try {
+        const { url } = await api(path, body);
+        location.assign(url);
+      } catch (err) {
+        button.disabled = false;
+        const messages = {
+          already_paid: 'That fee has already been paid.',
+          already_subscribed: 'Your maintenance plan is already active.',
+          billing_not_ready: 'Billing for your account is still being set up. Please try again shortly.',
+        };
+        notice(messages[err.code] ?? 'Something went wrong. Please try again.', 'error');
+      }
+    }
+
+    async function load() {
+      // All reads run as the signed-in user; RLS returns only this client's rows.
+      const [clients, subs, invoices, payments] = await Promise.all([
+        sb.from('clients').select('business_name, status').limit(1),
+        sb.from('subscriptions').select('*').order('stripe_created_at', { ascending: false }),
+        sb.from('invoices').select('*').order('stripe_created_at', { ascending: false }),
+        sb.from('payments').select('*').order('paid_at', { ascending: false }),
+      ]);
+      const failed = [clients, subs, invoices, payments].find((r) => r.error);
+      if (failed) throw failed.error;
+      if (!clients.data.length) {
+        notice('This sign-in is not linked to a client account. Contact us if you think this is a mistake.', 'error');
+        return { websitePaid: false, live: false };
+      }
+      $('business').textContent = clients.data[0].business_name;
+
+      const live = subs.data.find((s) => ['active', 'trialing', 'past_due', 'unpaid', 'incomplete'].includes(s.status));
+      const websitePaid = payments.data.some((p) => p.product === 'website_fee');
+
+      $('plan').replaceChildren(
+        live
+          ? el('span', {}, 'Maintenance plan: ', statusBadge(live.status),
+              live.cancel_at_period_end ? ` · ends ${date(live.current_period_end)}` : ` · renews ${date(live.current_period_end)}`)
+          : el('span', {}, 'No active maintenance plan.'),
+        el('br'),
+        el('span', {}, websitePaid ? 'Website build fee: paid.' : 'Website build fee: not yet paid.'),
+      );
+
+      const actions = [];
+      if (!websitePaid) {
+        const b = el('button', { class: 'primary' }, 'Pay website fee ($1,000)');
+        b.addEventListener('click', () => go(b, '/api/create-checkout', { product: 'website_fee' }));
+        actions.push(b);
+      }
+      if (!live) {
+        const b = el('button', { class: websitePaid ? 'primary' : '' }, 'Start maintenance ($100/mo)');
+        b.addEventListener('click', () => go(b, '/api/create-checkout', { product: 'maintenance' }));
+        actions.push(b);
+      }
+      const portal = el('button', {}, 'Payment methods & billing history');
+      portal.addEventListener('click', () => go(portal, '/api/billing-portal'));
+      actions.push(portal);
+      $('actions').replaceChildren(...actions);
+
+      $('invoices').replaceChildren(table(
+        ['Invoice', 'Description', 'Status', 'Amount', 'Due', ''],
+        invoices.data.map((i) => [
+          i.number ?? '—', i.description ?? '—', statusBadge(i.status), money(i.amount_due, i.currency), date(i.due_date),
+          i.status === 'open' && i.hosted_invoice_url
+            ? el('a', { class: 'btn', href: i.hosted_invoice_url, target: '_blank', rel: 'noopener' }, 'Pay')
+            : '',
+        ]),
+        'No invoices yet.',
+      ));
+      $('payments').replaceChildren(table(
+        ['Date', 'Description', 'Amount'],
+        payments.data.map((p) => [date(p.paid_at), p.description ?? '—', money(p.amount, p.currency)]),
+        'No payments yet.',
+      ));
+      return { websitePaid, live: Boolean(live) };
+    }
+
+    try {
+      const state = await load();
+      if (params.get('checkout') === 'success') {
+        // The return URL proves nothing. Payment shows once the verified webhook records it.
+        const recorded = (s) => (params.get('product') === 'maintenance' ? s.live : s.websitePaid);
+        if (recorded(state)) {
+          notice('Payment received. Thank you!');
+        } else {
+          notice('Thanks. We are confirming your payment with Stripe; this page updates when it is recorded.');
+          for (let i = 0; i < 10; i++) {
+            await new Promise((r) => setTimeout(r, 3000));
+            if (recorded(await load())) {
+              notice('Payment received. Thank you!');
+              break;
+            }
+          }
+        }
+      } else if (params.get('checkout') === 'cancelled') {
+        notice('Checkout was cancelled. No payment was taken.');
+      }
+    } catch (err) {
+      console.error(err);
+      notice('Could not load your account. Please refresh.', 'error');
+    }
+  </script>
+</body>
+</html>
